@@ -232,7 +232,7 @@ static void frbwrite(int l)
 
 static int init_port(void)
 {
-	int i, nlow, nhigh, ret;
+	int err, ret;
 
 	if (!gpio_is_valid(gpio_out_pin)) {
 		printk("gpio_remote module: requested GPIO is not valid\n");
@@ -240,30 +240,28 @@ static int init_port(void)
 		return -1;
 	}
 
-	int err = gpio_request(gpio_out_pin ,"gpio_remoteIRQ");
-	//error check
+	err = gpio_request(gpio_out_pin ,"gpio_remoteIRQ");
 	if(err) {
 		printk("gpio_remote module: failed to request GPIO %i\n",gpio_out_pin);
+		ret = -ENODEV;
 		goto exit_init_port;
 	}
 	
 	// set as output
 	err = gpio_direction_output(gpio_out_pin, 0);
-
-	//error check
 	if(err) {
 		printk("gpio_remote module: failed to set GPIO to ouput\n");
 		ret = -ENODEV;
 		goto exit_gpio_free_out_pin;
-			
 	}
+
 	gpio_set_value(gpio_out_pin, 0);
 	return 0;
 
-	exit_gpio_free_out_pin:
+exit_gpio_free_out_pin:
 	gpio_free(gpio_out_pin);
 
-	exit_init_port:
+exit_init_port:
 	return ret;
 }
 
