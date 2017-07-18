@@ -45,7 +45,7 @@
 
 #define LIRC_DRIVER_NAME "lirc-gpio"
 #define RBUF_LEN 256
-#define LIRC_TRANSMITTER_LATENCY 256
+#define LIRC_TRANSMITTER_LATENCY 2
 
 #ifndef MAX_UDELAY_MS
 #define MAX_UDELAY_US 5000
@@ -74,11 +74,10 @@ static int softcarrier = 1;
 
 /* forward declarations */
 static long send_pulse(unsigned long length);
-static void send_space(long length);
+static void send_space(unsigned long length);
 static void lirc_rpi_exit(void);
 
 static struct platform_device *lirc_rpi_dev;
-static struct timeval lasttv = { 0, 0 };
 static struct lirc_buffer rbuf;
 static spinlock_t lock;
 
@@ -91,6 +90,13 @@ static unsigned long space_width;
 
 static void safe_udelay(unsigned long usecs)
 {
+	dprintk("safe_udelay len: %lu\n", usecs);
+
+	if (usecs > 1000000){
+		dprintk("value too high, skipping\n");
+		return;
+	}
+
 	while (usecs > MAX_UDELAY_US) {
 		udelay(MAX_UDELAY_US);
 		usecs -= MAX_UDELAY_US;
@@ -113,7 +119,7 @@ static int init_timing_params(unsigned int new_duty_cycle,
 		return -EINVAL;
 	duty_cycle = new_duty_cycle;
 	freq = new_freq;
-	period = 256 * 1000000L / freq;
+	period = 1000000L / freq;
 	pulse_width = period * duty_cycle / 100;
 	space_width = period - pulse_width;
 	dprintk("in init_timing_params, freq=%d pulse=%ld, "
@@ -126,31 +132,32 @@ static long send_pulse_softcarrier(unsigned long length)
 	int flag;
 	unsigned long actual, target, d;
 
-	length <<= 8;
+	dprintk("length %lu\n", length);
+
+	if (length < 1)
+		return 0;
 
 	actual = 0; target = 0; flag = 0;
 	while (actual < length) {
 		if (flag) {
-			//gpiochip->set(gpiochip, gpio_out_pin, 0);
 			gpio_set_value(gpio_out_pin, 0);
-
-			target += space_width;
+			d = space_width;
+			dprintk("gpio_off\n");
 		} else {
 			gpio_set_value(gpio_out_pin, 1);
-//			gpiochip->set(gpiochip, gpio_out_pin, 1);
-			target += pulse_width;
+			d = pulse_width;
+			dprintk("gpio_on\n");
 		}
-		d = (target - actual -
-		     LIRC_TRANSMITTER_LATENCY + 128) >> 8;
+		d -= LIRC_TRANSMITTER_LATENCY;
 		/*
 		 * Note - we've checked in ioctl that the pulse/space
 		 * widths are big enough so that d is > 0
 		 */
-		udelay(d);
-		actual += (d << 8) + LIRC_TRANSMITTER_LATENCY;
+		safe_udelay(d);
+		actual += d + LIRC_TRANSMITTER_LATENCY;
 		flag = !flag;
 	}
-	return (actual-length) >> 8;
+	return (actual-length);
 }
 
 static long send_pulse(unsigned long length)
@@ -168,9 +175,10 @@ static long send_pulse(unsigned long length)
 	}
 }
 
-static void send_space(long length)
+static void send_space(unsigned long length)
 {
 //	gpiochip->set(gpiochip, gpio_out_pin, 0);
+	dprintk("sending space len: %lu\n", length);
 	gpio_set_value(gpio_out_pin, 0);
 	if (length <= 0)
 		return;
@@ -279,9 +287,9 @@ static ssize_t lirc_write(struct file *file, const char *buf,
 	size_t n, loff_t *ppos)
 {
 	int i, count;
-	unsigned long flags;
+	unsigned long flags, length;
 	long delta = 0;
-	int *wbuf;
+	unsigned long *wbuf;
 
 	count = n / sizeof(int);
 	if (n % sizeof(int) || count % 2 == 0)
@@ -289,18 +297,20 @@ static ssize_t lirc_write(struct file *file, const char *buf,
 	wbuf = memdup_user(buf, n);
 	if (IS_ERR(wbuf))
 		return PTR_ERR(wbuf);
-	spin_lock_irqsave(&lock, flags);
+//	spin_lock_irqsave(&lock, flags);
 
 	for (i = 0; i < count; i++) {
+		length = wbuf[i] & 0x00ffffff;
+		dprintk("sending signal %d len %lu\n", i, length);
 		if (i%2)
-			send_space(wbuf[i] - delta);
+			send_space(length);
 		else
-			delta = send_pulse(wbuf[i]);
+			delta = send_pulse(length);
 	}
 //	gpiochip->set(gpiochip, gpio_out_pin, 0);
 	gpio_set_value(gpio_out_pin, 0);
 
-	spin_unlock_irqrestore(&lock, flags);
+//	spin_unlock_irqrestore(&lock, flags);
 	kfree(wbuf);
 	return n;
 }
@@ -395,6 +405,8 @@ static int __init lirc_rpi_init(void)
 	result = lirc_buffer_init(&rbuf, sizeof(int), RBUF_LEN);
 	if (result < 0)
 		return -ENOMEM;
+
+	init_timing_params(duty_cycle, freq);
 
 	result = platform_driver_register(&lirc_rpi_driver);
 	if (result) {
